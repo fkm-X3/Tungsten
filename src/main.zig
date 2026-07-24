@@ -2,33 +2,44 @@ const std = @import("std");
 const Io = std.Io;
 
 const Tungsten = @import("Tungsten");
+const ir = Tungsten.ir;
 
 pub fn main(init: std.process.Init) !void {
-    // Prints to stderr, unbuffered, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-
-    // This is appropriate for anything that lives as long as the process.
     const arena: std.mem.Allocator = init.arena.allocator();
 
-    // Accessing command line arguments:
-    const args = try init.minimal.args.toSlice(arena);
-    for (args) |arg| {
-        std.log.info("arg: {s}", .{arg});
-    }
+    var module = ir.Module.empty;
+    defer module.deinit(arena);
 
-    // In order to do I/O operations need an `Io` instance.
-    const io = init.io;
+    var builder = ir.Builder.init(arena, &module);
+    const i32_type = try builder.addIntType(true, 32);
+    _ = try builder.addVoidType();
 
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout_writer = &stdout_file_writer.interface;
+    const fib = try builder.addFunction("fib", i32_type);
+    builder.setCurrentFunction(fib);
 
-    try Tungsten.printAnotherMessage(stdout_writer);
+    const entry = try builder.appendBlock();
+    builder.setCurrentBlock(entry);
 
-    try stdout_writer.flush(); // Don't forget to flush!
+    const n = @as(ir.Value, @enumFromInt(0));
+    const one = @as(ir.Value, @enumFromInt(1));
+    const cond = try builder.buildIcmp(.icmp_sle, i32_type, n, one);
+
+    const base = try builder.appendBlock();
+    const recurse = try builder.appendBlock();
+    _ = try builder.buildCondBr(cond, base, recurse);
+
+    builder.setCurrentBlock(base);
+    _ = try builder.buildRet(n);
+
+    builder.setCurrentBlock(recurse);
+    _ = try builder.buildRet(n);
+
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_file_writer: Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
+    const writer = &stdout_file_writer.interface;
+
+    try ir.printModule(&module, writer);
+    try writer.flush();
 }
 
 test "simple test" {
