@@ -1,3 +1,3 @@
 # Tungsten
 
-Use zig 0.17.0 for this project.
+Use Zig 0.16.0 for this project
