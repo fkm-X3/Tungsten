@@ -3,3 +3,4 @@ const std = @import("std");
 
 pub const ir = @import("ir.zig");
 pub const codegen = @import("codegen.zig");
+pub const api = @import("api.zig");
