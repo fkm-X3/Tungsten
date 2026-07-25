@@ -3,6 +3,7 @@ const Io = std.Io;
 
 const Tungsten = @import("Tungsten");
 const ir = Tungsten.ir;
+const codegen = Tungsten.codegen;
 
 pub fn main(init: std.process.Init) !void {
     const arena: std.mem.Allocator = init.arena.allocator();
@@ -14,32 +15,25 @@ pub fn main(init: std.process.Init) !void {
     const i32_type = try builder.addIntType(true, 32);
     _ = try builder.addVoidType();
 
-    const fib = try builder.addFunction("fib", i32_type);
-    builder.setCurrentFunction(fib);
+    const add_fn = try builder.addFunction("add", i32_type, 2);
+    builder.setCurrentFunction(add_fn);
 
     const entry = try builder.appendBlock();
     builder.setCurrentBlock(entry);
 
-    const n = @as(ir.Value, @enumFromInt(0));
-    const one = @as(ir.Value, @enumFromInt(1));
-    const cond = try builder.buildIcmp(.icmp_sle, i32_type, n, one);
+    const a = @as(ir.Value, @enumFromInt(0));
+    const b = @as(ir.Value, @enumFromInt(1));
+    const sum = try builder.buildAdd(i32_type, a, b);
+    _ = try builder.buildRet(sum);
 
-    const base = try builder.appendBlock();
-    const recurse = try builder.appendBlock();
-    _ = try builder.buildCondBr(cond, base, recurse);
+    var cg = codegen.CodeGen.init(arena, &module);
+    defer cg.deinit();
+    try cg.emitModule();
 
-    builder.setCurrentBlock(base);
-    _ = try builder.buildRet(n);
-
-    builder.setCurrentBlock(recurse);
-    _ = try builder.buildRet(n);
-
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
-    const writer = &stdout_file_writer.interface;
-
-    try ir.printModule(&module, writer);
-    try writer.flush();
+    const dir: std.Io.Dir = .cwd();
+    const file = try dir.createFile(init.io, "output.asm", .{});
+    defer file.close(init.io);
+    try file.writePositionalAll(init.io, cg.buf.items, 0);
 }
 
 test "simple test" {

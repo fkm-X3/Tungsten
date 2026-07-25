@@ -2,3 +2,4 @@
 const std = @import("std");
 
 pub const ir = @import("ir.zig");
+pub const codegen = @import("codegen.zig");

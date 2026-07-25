@@ -159,6 +159,7 @@ pub const StringPool = struct {
 pub const Function = struct {
     name: StringRef,
     return_type: TypeIdx,
+    param_count: u32,
     blocks: std.ArrayList(BasicBlock),
     instructions: std.ArrayList(Instruction),
     /// Operand pool: flat u32 array referenced by Instruction.operands
@@ -167,6 +168,7 @@ pub const Function = struct {
     pub const empty: Function = .{
         .name = .{ .start = 0, .len = 0 },
         .return_type = @enumFromInt(0),
+        .param_count = 0,
         .blocks = .empty,
         .instructions = .empty,
         .extra_data = .empty,
@@ -285,12 +287,13 @@ pub const Builder = struct {
 
     // -- Function --
 
-    pub fn addFunction(self: *Builder, name: []const u8, return_type: TypeIdx) !FunctionIdx {
+    pub fn addFunction(self: *Builder, name: []const u8, return_type: TypeIdx, param_count: u32) !FunctionIdx {
         const name_ref = try self.module.strings.intern(self.gpa, name);
         const idx: u32 = @intCast(self.module.functions.items.len);
         var func = Function.empty;
         func.name = name_ref;
         func.return_type = return_type;
+        func.param_count = param_count;
         try self.module.functions.append(self.gpa, func);
         return @enumFromInt(idx);
     }
@@ -560,7 +563,7 @@ test "basic module construction" {
     _ = try builder.addVoidType();
     const i32_type = try builder.addIntType(false, 32);
 
-    const func = try builder.addFunction("main", i32_type);
+    const func = try builder.addFunction("main", i32_type, 0);
     builder.setCurrentFunction(func);
 
     const entry = try builder.appendBlock();
@@ -580,7 +583,7 @@ test "fibonacci construction" {
     var builder = Builder.init(std.testing.allocator, &module);
     const i32_type = try builder.addIntType(true, 32);
 
-    const fib = try builder.addFunction("fib", i32_type);
+    const fib = try builder.addFunction("fib", i32_type, 1);
     builder.setCurrentFunction(fib);
 
     const entry = try builder.appendBlock();
