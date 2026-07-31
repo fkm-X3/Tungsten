@@ -50,6 +50,7 @@ pub const IntType = ir.IntType;
 pub const PointerType = ir.PointerType;
 pub const FunctionType = ir.FunctionType;
 pub const PhiIncoming = ir.PhiIncoming;
+pub const GlobalIdx = ir.GlobalIdx;
 
 // ============================================================================
 // Context
@@ -179,6 +180,27 @@ pub const Context = struct {
     }
 
     // ========================================================================
+    // Globals
+    // ========================================================================
+
+    /// Add a string-literal global. The data is emitted NUL-terminated in the
+    /// .data section and addressed via `buildGlobalAddr`.
+    pub fn addStringGlobal(self: *Context, name: []const u8, data: []const u8) !GlobalIdx {
+        return self.builder.addStringGlobal(name, data);
+    }
+
+    /// Add a vtable global: an array of function pointers, one per virtual
+    /// method, in declaration order.
+    pub fn addFnArrayGlobal(self: *Context, name: []const u8, funcs: []const FunctionIdx) !GlobalIdx {
+        return self.builder.addFnArrayGlobal(name, funcs);
+    }
+
+    /// Return the number of globals in the module.
+    pub fn getGlobalCount(self: *Context) usize {
+        return self.module.globals.items.len;
+    }
+
+    // ========================================================================
     // Basic Blocks
     // ========================================================================
 
@@ -207,6 +229,20 @@ pub const Context = struct {
     }
 
     // ========================================================================
+    // Instruction Building — Constants
+    // ========================================================================
+
+    /// Materialize an integer constant.
+    pub fn buildIntConst(self: *Context, type_idx: TypeIdx, value: i64) !Value {
+        return self.builder.buildIntConst(type_idx, value);
+    }
+
+    /// Materialize a floating-point constant.
+    pub fn buildFloatConst(self: *Context, type_idx: TypeIdx, value: f64) !Value {
+        return self.builder.buildFloatConst(type_idx, value);
+    }
+
+    // ========================================================================
     // Instruction Building — Arithmetic
     // ========================================================================
 
@@ -228,6 +264,30 @@ pub const Context = struct {
 
     pub fn buildUDiv(self: *Context, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
         return self.builder.buildUDiv(type_idx, lhs, rhs);
+    }
+
+    pub fn buildSRem(self: *Context, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.builder.buildSRem(type_idx, lhs, rhs);
+    }
+
+    pub fn buildURem(self: *Context, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.builder.buildURem(type_idx, lhs, rhs);
+    }
+
+    pub fn buildFAdd(self: *Context, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.builder.buildFAdd(type_idx, lhs, rhs);
+    }
+
+    pub fn buildFSub(self: *Context, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.builder.buildFSub(type_idx, lhs, rhs);
+    }
+
+    pub fn buildFMul(self: *Context, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.builder.buildFMul(type_idx, lhs, rhs);
+    }
+
+    pub fn buildFDiv(self: *Context, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.builder.buildFDiv(type_idx, lhs, rhs);
     }
 
     // ========================================================================
@@ -265,6 +325,13 @@ pub const Context = struct {
         return self.builder.buildIcmp(cond, type_idx, lhs, rhs);
     }
 
+    /// Build a floating-point comparison.
+    ///
+    /// `cond` must be one of the `fcmp_*` opcodes (e.g. `.fcmp_olt`).
+    pub fn buildFCmp(self: *Context, cond: Opcode, type_idx: TypeIdx, lhs: Value, rhs: Value) !Value {
+        return self.builder.buildFCmp(cond, type_idx, lhs, rhs);
+    }
+
     // ========================================================================
     // Instruction Building — Control Flow
     // ========================================================================
@@ -285,6 +352,11 @@ pub const Context = struct {
         return self.builder.buildRet(val);
     }
 
+    /// Build a return instruction for void functions.
+    pub fn buildRetVoid(self: *Context) !Value {
+        return self.builder.buildRetVoid();
+    }
+
     // ========================================================================
     // Instruction Building — Function Calls
     // ========================================================================
@@ -292,6 +364,11 @@ pub const Context = struct {
     /// Build a call to `func` passing the given arguments.
     pub fn buildCall(self: *Context, func: FunctionIdx, type_idx: TypeIdx, args: []const Value) !Value {
         return self.builder.buildCall(func, type_idx, args);
+    }
+
+    /// Build an indirect call through the function pointer `callee`.
+    pub fn buildCallPtr(self: *Context, type_idx: TypeIdx, callee: Value, args: []const Value) !Value {
+        return self.builder.buildCallPtr(type_idx, callee, args);
     }
 
     // ========================================================================
@@ -311,6 +388,21 @@ pub const Context = struct {
     /// Store `val` (of `type_idx`) through `ptr`.
     pub fn buildStore(self: *Context, type_idx: TypeIdx, ptr: Value, val: Value) !Value {
         return self.builder.buildStore(type_idx, ptr, val);
+    }
+
+    /// Compute `ptr + offset` (unscaled byte offset).
+    pub fn buildPtrAdd(self: *Context, type_idx: TypeIdx, ptr: Value, offset: Value) !Value {
+        return self.builder.buildPtrAdd(type_idx, ptr, offset);
+    }
+
+    /// Heap-allocate `size` bytes. Returns a pointer to the allocation.
+    pub fn buildMalloc(self: *Context, type_idx: TypeIdx, size: Value) !Value {
+        return self.builder.buildMalloc(type_idx, size);
+    }
+
+    /// Take the address of a module-level global.
+    pub fn buildGlobalAddr(self: *Context, type_idx: TypeIdx, global: GlobalIdx) !Value {
+        return self.builder.buildGlobalAddr(type_idx, global);
     }
 
     // ========================================================================
@@ -401,7 +493,7 @@ test "function and instruction building" {
 
     try std.testing.expectEqual(@as(usize, 1), ctx.getFunctionCount());
     try std.testing.expectEqual(@as(usize, 1), ctx.getBlockCountIn(func));
-    try std.testing.expectEqual(@as(usize, 3), ctx.getInstructionCountIn(func));
+    try std.testing.expectEqual(@as(usize, 2), ctx.getInstructionCountIn(func));
     try std.testing.expectEqualStrings("add", ctx.getFunctionName(func));
 }
 
@@ -451,12 +543,10 @@ test "print textual IR" {
     const zero = @as(Value, @enumFromInt(0));
     _ = try ctx.buildRet(zero);
 
-    var buf = std.ArrayList(u8).empty;
-    defer buf.deinit(std.testing.allocator);
-    try ctx.print(buf.writer(std.testing.allocator));
-
-    const text = try buf.toOwnedSlice(std.testing.allocator);
-    defer std.testing.allocator.free(text);
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try ctx.print(&w);
+    const text = buf[0..w.end];
 
     try std.testing.expect(std.mem.indexOf(u8, text, "@main") != null);
 }
@@ -496,7 +586,7 @@ test "all binary opcodes compile" {
     _ = try ctx.buildIcmp(.icmp_ugt, i32_ty, a, b);
     _ = try ctx.buildIcmp(.icmp_uge, i32_ty, a, b);
 
-    try std.testing.expectEqual(@as(usize, 21), ctx.getInstructionCountIn(func));
+    try std.testing.expectEqual(@as(usize, 20), ctx.getInstructionCountIn(func));
 }
 
 test "memory and call instructions" {
@@ -525,7 +615,102 @@ test "memory and call instructions" {
     _ = try ctx.buildRet(loaded);
 
     try std.testing.expectEqual(@as(usize, 2), ctx.getFunctionCount());
-    try std.testing.expectEqual(@as(usize, 6), ctx.getInstructionCountIn(caller));
+    try std.testing.expectEqual(@as(usize, 5), ctx.getInstructionCountIn(caller));
+}
+
+test "extended opcodes" {
+    const ctx = try Context.init(std.testing.allocator);
+    defer ctx.deinit();
+
+    const f64_ty = try ctx.floatType(.f64);
+    const ptr_ty = try ctx.ptrType(f64_ty);
+    const void_ty = try ctx.voidType();
+    const i32_ty = try ctx.intType(true, 32);
+
+    const helper = try ctx.addFunction("helper", void_ty, 0);
+    ctx.setCurrentFunction(helper);
+    const h_entry = try ctx.appendBlock();
+    ctx.setCurrentBlock(h_entry);
+    _ = try ctx.buildRetVoid();
+
+    const str_global = try ctx.addStringGlobal("greeting", "hello world");
+    const vt_global = try ctx.addFnArrayGlobal("vtable", &.{helper});
+
+    const func = try ctx.addFunction("float_main", i32_ty, 2);
+    ctx.setCurrentFunction(func);
+    const entry = try ctx.appendBlock();
+    ctx.setCurrentBlock(entry);
+
+    const a = ctx.getParam(0);
+    const b = ctx.getParam(1);
+
+    _ = try ctx.buildFAdd(f64_ty, a, b);
+    _ = try ctx.buildFSub(f64_ty, a, b);
+    _ = try ctx.buildFMul(f64_ty, a, b);
+    _ = try ctx.buildFDiv(f64_ty, a, b);
+    _ = try ctx.buildFCmp(.fcmp_olt, f64_ty, a, b);
+    _ = try ctx.buildSRem(i32_ty, a, b);
+    _ = try ctx.buildURem(i32_ty, a, b);
+    const ptr = try ctx.buildPtrAdd(ptr_ty, a, b);
+    const alloc = try ctx.buildMalloc(ptr_ty, a);
+    const sptr = try ctx.buildGlobalAddr(ptr_ty, str_global);
+    _ = try ctx.buildCallPtr(i32_ty, sptr, &.{ a, b });
+    _ = try ctx.buildStore(i32_ty, alloc, a);
+    _ = try ctx.buildRet(ptr);
+
+    try std.testing.expectEqual(@as(usize, 2), ctx.getGlobalCount());
+    _ = vt_global;
+}
+
+test "emit assembly with globals floats and heap" {
+    const ctx = try Context.init(std.testing.allocator);
+    defer ctx.deinit();
+
+    const void_ty = try ctx.voidType();
+    const i64_ty = try ctx.intType(true, 64);
+    const f64_ty = try ctx.floatType(.f64);
+    const ptr_ty = try ctx.ptrType(i64_ty);
+
+    const helper = try ctx.addFunction("helper", void_ty, 0);
+    ctx.setCurrentFunction(helper);
+    const h_entry = try ctx.appendBlock();
+    ctx.setCurrentBlock(h_entry);
+    _ = try ctx.buildRetVoid();
+
+    const str_global = try ctx.addStringGlobal("greeting", "hi");
+    _ = try ctx.addFnArrayGlobal("vtable", &.{helper});
+
+    const func = try ctx.addFunction("main", i64_ty, 0);
+    ctx.setCurrentFunction(func);
+    const entry = try ctx.appendBlock();
+    ctx.setCurrentBlock(entry);
+
+    const one = try ctx.buildIntConst(i64_ty, 1);
+    const two = try ctx.buildIntConst(i64_ty, 2);
+    const half = try ctx.buildFloatConst(f64_ty, 0.5);
+    const sum = try ctx.buildFAdd(f64_ty, half, half);
+    _ = try ctx.buildFCmp(.fcmp_oge, f64_ty, sum, half);
+    _ = try ctx.buildSRem(i64_ty, two, one);
+    const alloc = try ctx.buildMalloc(ptr_ty, one);
+    const sptr = try ctx.buildGlobalAddr(ptr_ty, str_global);
+    _ = try ctx.buildCallPtr(i64_ty, sptr, &.{ one, two });
+    _ = try ctx.buildRet(alloc);
+
+    const asm_text = try ctx.emitAssembly();
+    defer ctx.gpa.free(asm_text);
+
+    try std.testing.expect(std.mem.indexOf(u8, asm_text, "section .data") != null);
+    try std.testing.expect(std.mem.indexOf(u8, asm_text, "__g0:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, asm_text, "db 104, 105, 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, asm_text, "dq _helper") != null);
+    try std.testing.expect(std.mem.indexOf(u8, asm_text, "addsd") != null);
+    try std.testing.expect(std.mem.indexOf(u8, asm_text, "ucomisd") != null);
+    try std.testing.expect(std.mem.indexOf(u8, asm_text, "call    malloc") != null);
+    try std.testing.expect(std.mem.indexOf(u8, asm_text, "call    rax") != null);
+    try std.testing.expect(std.mem.indexOf(u8, asm_text, "lea     rax, [rel __g0]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, asm_text, "extern malloc") != null);
+    try std.testing.expect(std.mem.indexOf(u8, asm_text, "mov     rax, 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, asm_text, "movq    xmm0, rax") != null);
 }
 
 test "function type creation" {

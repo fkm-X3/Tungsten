@@ -48,9 +48,45 @@ pub const CodeGen = struct {
             \\
         );
 
+        if (self.moduleUsesMalloc()) {
+            try self.emitStr("extern malloc\n\n");
+        }
+
         for (self.module.functions.items) |*func| {
             try self.emitFunction(func);
             try self.emitStr("\n");
+        }
+
+        if (self.module.globals.items.len > 0) {
+            try self.emitStr(
+                \\
+                \\section .data
+                \\
+            );
+            for (self.module.globals.items, 0..) |global, i| {
+                try self.emit("    align 8\n__g{d}:\n", .{i});
+                switch (global.kind) {
+                    .string => |data| {
+                        const bytes = self.module.strings.get(data);
+                        try self.emitStr("    db ");
+                        for (bytes, 0..) |byte, j| {
+                            if (j > 0) try self.emitStr(", ");
+                            try self.emit("{d}", .{byte});
+                        }
+                        if (bytes.len > 0) try self.emitStr(", ");
+                        try self.emitStr("0\n");
+                    },
+                    .fn_array => |funcs| {
+                        try self.emitStr("    dq ");
+                        for (funcs, 0..) |func_idx, j| {
+                            if (j > 0) try self.emitStr(", ");
+                            const fname = self.module.strings.get(self.module.functions.items[func_idx].name);
+                            try self.emit("_{s}", .{fname});
+                        }
+                        try self.emitStr("\n");
+                    },
+                }
+            }
         }
     }
 
@@ -130,7 +166,7 @@ pub const CodeGen = struct {
                 const inst = func.instructions.items[start + rel];
                 const is_last = rel == block.inst_count - 1;
 
-                if (is_last and (inst.opcode == .br or inst.opcode == .cond_br or inst.opcode == .ret)) {
+                if (is_last and (inst.opcode == .br or inst.opcode == .cond_br or inst.opcode == .ret or inst.opcode == .ret_void)) {
                     try self.emitControlFlow(func, inst, block_idx);
                 } else {
                     try self.emitInstruction(func, inst, start + rel);
@@ -139,11 +175,79 @@ pub const CodeGen = struct {
         }
     }
 
+    /// Returns true if any instruction in the module calls `malloc`.
+    fn moduleUsesMalloc(self: *const @This()) bool {
+        for (self.module.functions.items) |func| {
+            for (func.instructions.items) |inst| {
+                if (inst.opcode == .malloc) return true;
+            }
+        }
+        return false;
+    }
+
+    /// Emits the shared call preamble: reserve shadow space (32 bytes per the
+    /// Windows x64 ABI) plus stack argument space, then marshal arguments into
+    /// registers and the stack. Returns the total number of bytes reserved on
+    /// the stack, which the caller must add back after the call instruction.
+    fn emitCallSetup(self: *@This(), ops: []const u32, arg_count: u32) !u32 {
+        const reg_args = [_][]const u8{ "rcx", "rdx", "r8", "r9" };
+        const num_reg_args: u32 = @min(arg_count, 4);
+        const num_stack_args: u32 = if (arg_count > 4) arg_count - 4 else 0;
+
+        var extra_stack: u32 = 32;
+        if (num_stack_args > 0) {
+            extra_stack += num_stack_args * 8;
+            if (extra_stack % 16 != 0) {
+                extra_stack += 8;
+            }
+        }
+
+        if (extra_stack > 0) {
+            try self.emit("    sub     rsp, {d}\n", .{extra_stack});
+        }
+
+        {
+            var i: u32 = 0;
+            while (i < num_reg_args) : (i += 1) {
+                const arg_off = self.value_offsets.get(@enumFromInt(ops[1 + i])).?;
+                try self.emit("    mov     {s}, [rbp{d}]\n", .{ reg_args[i], arg_off });
+            }
+        }
+
+        {
+            var i: u32 = arg_count;
+            while (i > 4) {
+                i -= 1;
+                const arg_off = self.value_offsets.get(@enumFromInt(ops[1 + i])).?;
+                const stack_pos: i32 = 32 + @as(i32, @intCast(i - 4)) * 8;
+                try self.emit("    mov     rax, [rbp{d}]\n", .{arg_off});
+                try self.emit("    mov     [rsp{d}], rax\n", .{stack_pos});
+            }
+        }
+
+        return extra_stack;
+    }
+
     fn emitInstruction(self: *@This(), func: *const ir.Function, inst: ir.Instruction, inst_idx: u32) !void {
         const value_idx = self.param_count + inst_idx;
         const ops = func.getOperands(inst.operands);
 
         switch (inst.opcode) {
+            .iconst => {
+                const r = self.value_offsets.get(@enumFromInt(value_idx)).?;
+                const bits: u64 = (@as(u64, ops[1]) << 32) | ops[0];
+                try self.emit("    mov     rax, {d}\n", .{@as(i64, @bitCast(bits))});
+                try self.emit("    mov     [rbp{d}], rax\n", .{r});
+            },
+
+            .fconst => {
+                const r = self.value_offsets.get(@enumFromInt(value_idx)).?;
+                const bits: u64 = (@as(u64, ops[1]) << 32) | ops[0];
+                try self.emit("    mov     rax, {d}\n", .{@as(i64, @bitCast(bits))});
+                try self.emitStr("    movq    xmm0, rax\n");
+                try self.emit("    movsd   [rbp{d}], xmm0\n", .{r});
+            },
+
             .add, .sub, .mul, .and_op, .or_op, .xor_op => |op| {
                 const r = self.value_offsets.get(@enumFromInt(value_idx)).?;
                 const a = self.value_offsets.get(@enumFromInt(ops[0])).?;
@@ -162,18 +266,20 @@ pub const CodeGen = struct {
                 try self.emit("    mov     [rbp{d}], rax\n", .{r});
             },
 
-            .sdiv, .udiv => |op| {
+            .sdiv, .udiv, .srem, .urem => |op| {
                 const r = self.value_offsets.get(@enumFromInt(value_idx)).?;
                 const a = self.value_offsets.get(@enumFromInt(ops[0])).?;
                 const b = self.value_offsets.get(@enumFromInt(ops[1])).?;
+                const is_signed = op == .sdiv or op == .srem;
+                const is_rem = op == .srem or op == .urem;
                 try self.emit("    mov     rax, [rbp{d}]\n", .{a});
-                if (op == .sdiv) {
+                if (is_signed) {
                     try self.emitStr("    cqo\n");
                 } else {
                     try self.emitStr("    xor     edx, edx\n");
                 }
-                try self.emit("    {s}     qword [rbp{d}]\n", .{ if (op == .sdiv) "idiv" else "div", b });
-                try self.emit("    mov     [rbp{d}], rax\n", .{r});
+                try self.emit("    {s}     qword [rbp{d}]\n", .{ if (is_signed) "idiv" else "div", b });
+                try self.emit("    mov     [rbp{d}], {s}\n", .{ r, if (is_rem) "rdx" else "rax" });
             },
 
             .shl, .shr => |op| {
@@ -184,6 +290,32 @@ pub const CodeGen = struct {
                 try self.emit("    mov     cl, byte [rbp{d}]\n", .{b});
                 try self.emit("    {s}     rax, cl\n", .{if (op == .shl) "shl" else "shr"});
                 try self.emit("    mov     [rbp{d}], rax\n", .{r});
+            },
+
+            .fadd, .fsub, .fmul, .fdiv => |op| {
+                const r = self.value_offsets.get(@enumFromInt(value_idx)).?;
+                const a = self.value_offsets.get(@enumFromInt(ops[0])).?;
+                const b = self.value_offsets.get(@enumFromInt(ops[1])).?;
+                const float = switch (self.module.getIrType(inst.type_idx)) {
+                    .float => |f| f,
+                    else => unreachable,
+                };
+                const mv: []const u8 = switch (float) {
+                    .f32 => "movss",
+                    .f64 => "movsd",
+                    .f16 => return error.UnsupportedFloatWidth,
+                };
+                const mn: []const u8 = switch (op) {
+                    .fadd => if (float == .f64) "addsd" else "addss",
+                    .fsub => if (float == .f64) "subsd" else "subss",
+                    .fmul => if (float == .f64) "mulsd" else "mulss",
+                    .fdiv => if (float == .f64) "divsd" else "divss",
+                    else => unreachable,
+                };
+                try self.emit("    {s}     xmm0, [rbp{d}]\n", .{ mv, a });
+                try self.emit("    {s}     xmm1, [rbp{d}]\n", .{ mv, b });
+                try self.emit("    {s}     xmm0, xmm1\n", .{mn});
+                try self.emit("    {s}     [rbp{d}], xmm0\n", .{ mv, r });
             },
 
             .icmp_eq, .icmp_ne, .icmp_slt, .icmp_sle, .icmp_sgt, .icmp_sge, .icmp_ult, .icmp_ule, .icmp_ugt, .icmp_uge => |cond| {
@@ -206,6 +338,36 @@ pub const CodeGen = struct {
                 try self.emit("    mov     rax, [rbp{d}]\n", .{a});
                 try self.emit("    cmp     rax, [rbp{d}]\n", .{b});
                 try self.emit("    {s}     al\n", .{sc});
+                try self.emitStr("    movzx   eax, al\n");
+                try self.emit("    mov     [rbp{d}], rax\n", .{r});
+            },
+
+            .fcmp_oeq, .fcmp_one, .fcmp_olt, .fcmp_ole, .fcmp_ogt, .fcmp_oge => |cond| {
+                const r = self.value_offsets.get(@enumFromInt(value_idx)).?;
+                const a = self.value_offsets.get(@enumFromInt(ops[0])).?;
+                const b = self.value_offsets.get(@enumFromInt(ops[1])).?;
+                const float = switch (self.module.getIrType(inst.type_idx)) {
+                    .float => |f| f,
+                    else => unreachable,
+                };
+                const mv: []const u8 = switch (float) {
+                    .f32 => "movss",
+                    .f64 => "movsd",
+                    .f16 => return error.UnsupportedFloatWidth,
+                };
+                const uc: []const u8 = if (float == .f64) "ucomisd" else "ucomiss";
+                try self.emit("    {s}     xmm0, [rbp{d}]\n", .{ mv, a });
+                try self.emit("    {s}     xmm1, [rbp{d}]\n", .{ mv, b });
+                try self.emit("    {s}     xmm0, xmm1\n", .{uc});
+                switch (cond) {
+                    .fcmp_oeq => try self.emitStr("    sete    al\n    setnp   cl\n    and     al, cl\n"),
+                    .fcmp_one => try self.emitStr("    setne   al\n    setp    cl\n    or      al, cl\n"),
+                    .fcmp_olt => try self.emitStr("    setb    al\n    setnp   cl\n    and     al, cl\n"),
+                    .fcmp_ole => try self.emitStr("    setbe   al\n    setnp   cl\n    and     al, cl\n"),
+                    .fcmp_ogt => try self.emitStr("    seta    al\n"),
+                    .fcmp_oge => try self.emitStr("    setae   al\n"),
+                    else => unreachable,
+                }
                 try self.emitStr("    movzx   eax, al\n");
                 try self.emit("    mov     [rbp{d}], rax\n", .{r});
             },
@@ -233,47 +395,58 @@ pub const CodeGen = struct {
                 try self.emitStr("    mov     [rax], rdx\n");
             },
 
+            .ptr_add => {
+                const r = self.value_offsets.get(@enumFromInt(value_idx)).?;
+                const a = self.value_offsets.get(@enumFromInt(ops[0])).?;
+                const b = self.value_offsets.get(@enumFromInt(ops[1])).?;
+                try self.emit("    mov     rax, [rbp{d}]\n", .{a});
+                try self.emit("    add     rax, [rbp{d}]\n", .{b});
+                try self.emit("    mov     [rbp{d}], rax\n", .{r});
+            },
+
+            .malloc => {
+                const r = self.value_offsets.get(@enumFromInt(value_idx)).?;
+                const size_off = self.value_offsets.get(@enumFromInt(ops[0])).?;
+                try self.emitStr("    sub     rsp, 32\n");
+                try self.emit("    mov     rcx, [rbp{d}]\n", .{size_off});
+                try self.emitStr("    call    malloc\n");
+                try self.emitStr("    add     rsp, 32\n");
+                try self.emit("    mov     [rbp{d}], rax\n", .{r});
+            },
+
+            .global_addr => {
+                const r = self.value_offsets.get(@enumFromInt(value_idx)).?;
+                try self.emit("    lea     rax, [rel __g{d}]\n", .{ops[0]});
+                try self.emit("    mov     [rbp{d}], rax\n", .{r});
+            },
+
             .call => {
                 const target_func = &self.module.functions.items[ops[0]];
                 const target_name = self.module.strings.get(target_func.name);
                 const arg_count: u32 = @intCast(ops.len - 1);
 
-                const reg_args = [_][]const u8{ "rcx", "rdx", "r8", "r9" };
-                const num_reg_args: u32 = @min(arg_count, 4);
-                const num_stack_args: u32 = if (arg_count > 4) arg_count - 4 else 0;
-
-                var extra_stack: u32 = 0;
-                if (num_stack_args > 0) {
-                    extra_stack = num_stack_args * 8;
-                    if (num_stack_args % 2 != 0) {
-                        extra_stack += 8;
-                    }
-                }
-
-                if (extra_stack > 0) {
-                    try self.emit("    sub     rsp, {d}\n", .{extra_stack});
-                }
-
-                {
-                    var i: u32 = 0;
-                    while (i < num_reg_args) : (i += 1) {
-                        const arg_off = self.value_offsets.get(@enumFromInt(ops[1 + i])).?;
-                        try self.emit("    mov     {s}, [rbp{d}]\n", .{ reg_args[i], arg_off });
-                    }
-                }
-
-                {
-                    var i: u32 = arg_count;
-                    while (i > 4) {
-                        i -= 1;
-                        const arg_off = self.value_offsets.get(@enumFromInt(ops[1 + i])).?;
-                        const stack_pos: i32 = 32 + @as(i32, @intCast(i - 4)) * 8;
-                        try self.emit("    mov     rax, [rbp{d}]\n", .{arg_off});
-                        try self.emit("    mov     [rsp{d}], rax\n", .{stack_pos});
-                    }
-                }
+                const extra_stack = try self.emitCallSetup(ops, arg_count);
 
                 try self.emit("    call    _{s}\n", .{target_name});
+
+                if (extra_stack > 0) {
+                    try self.emit("    add     rsp, {d}\n", .{extra_stack});
+                }
+
+                if (inst.producesValue()) {
+                    const r = self.value_offsets.get(@enumFromInt(value_idx)).?;
+                    try self.emit("    mov     [rbp{d}], rax\n", .{r});
+                }
+            },
+
+            .call_ptr => {
+                const arg_count: u32 = @intCast(ops.len - 1);
+
+                const extra_stack = try self.emitCallSetup(ops, arg_count);
+
+                const callee_off = self.value_offsets.get(@enumFromInt(ops[0])).?;
+                try self.emit("    mov     rax, [rbp{d}]\n", .{callee_off});
+                try self.emitStr("    call    rax\n");
 
                 if (extra_stack > 0) {
                     try self.emit("    add     rsp, {d}\n", .{extra_stack});
@@ -289,7 +462,7 @@ pub const CodeGen = struct {
                 try self.emitStr("    ; phi (resolved at branch site)\n");
             },
 
-            .br, .cond_br, .ret => unreachable,
+            .br, .cond_br, .ret, .ret_void => unreachable,
         }
     }
 
@@ -322,6 +495,12 @@ pub const CodeGen = struct {
             .ret => {
                 const val_off = self.value_offsets.get(@enumFromInt(ops[0])).?;
                 try self.emit("    mov     rax, [rbp{d}]\n", .{val_off});
+                try self.emitStr(
+                    \\    leave
+                    \\    ret
+                );
+            },
+            .ret_void => {
                 try self.emitStr(
                     \\    leave
                     \\    ret
