@@ -78,6 +78,9 @@ pub const CodeGen = struct {
                     },
                     .fn_array => |funcs| {
                         try self.emitStr("    dq ");
+                        if (funcs.len == 0) {
+                            try self.emitStr("0");
+                        }
                         for (funcs, 0..) |func_idx, j| {
                             if (j > 0) try self.emitStr(", ");
                             const fname = self.module.strings.get(self.module.functions.items[func_idx].name);
@@ -109,7 +112,7 @@ pub const CodeGen = struct {
         var alloca_data_slots: u32 = 0;
         for (func.instructions.items) |inst| {
             if (inst.producesValue()) value_slots += 1;
-            if (inst.opcode == .alloca) alloca_data_slots += 1;
+            if (inst.opcode == .alloca) alloca_data_slots += allocaSlotCount(func, inst);
         }
 
         const raw_size: u32 = 32 + (value_slots + alloca_data_slots) * 8;
@@ -136,7 +139,8 @@ pub const CodeGen = struct {
                 const value_idx = self.param_count + i;
 
                 if (inst.opcode == .alloca) {
-                    offset -= 8;
+                    const slots = allocaSlotCount(func, inst);
+                    offset -= @as(i32, @intCast(slots * 8));
                     const data_off = offset;
                     offset -= 8;
                     try self.value_offsets.put(self.gpa, @enumFromInt(value_idx), offset);
@@ -183,6 +187,15 @@ pub const CodeGen = struct {
             }
         }
         return false;
+    }
+
+    /// Number of 8-byte frame slots an `alloca` occupies. An operand-less
+    /// alloca reserves 8 bytes; an alloca with a size operand reserves
+    /// `ceil(size / 8)` slots.
+    fn allocaSlotCount(func: *const ir.Function, inst: ir.Instruction) u32 {
+        const ops = func.getOperands(inst.operands);
+        const size: u32 = if (ops.len == 0) 8 else ops[0];
+        return (size + 7) / 8;
     }
 
     /// Emits the shared call preamble: reserve shadow space (32 bytes per the
@@ -286,9 +299,14 @@ pub const CodeGen = struct {
                 const r = self.value_offsets.get(@enumFromInt(value_idx)).?;
                 const a = self.value_offsets.get(@enumFromInt(ops[0])).?;
                 const b = self.value_offsets.get(@enumFromInt(ops[1])).?;
+                // Signed types shift right arithmetically (SAR).
+                const is_signed = switch (self.module.getIrType(inst.type_idx)) {
+                    .int => |it| it.signed,
+                    else => false,
+                };
                 try self.emit("    mov     rax, [rbp{d}]\n", .{a});
                 try self.emit("    mov     cl, byte [rbp{d}]\n", .{b});
-                try self.emit("    {s}     rax, cl\n", .{if (op == .shl) "shl" else "shr"});
+                try self.emit("    {s}     rax, cl\n", .{if (op == .shl) "shl" else if (is_signed) "sar" else "shr"});
                 try self.emit("    mov     [rbp{d}], rax\n", .{r});
             },
 

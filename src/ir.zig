@@ -596,6 +596,20 @@ pub const Builder = struct {
         });
     }
 
+    /// Allocate `size_bytes` of stack space, aligned to 8 bytes.
+    ///
+    /// Returns a pointer to the start of the block. Multiple allocas get
+    /// disjoint frame regions, so this is safe for aggregates (structs,
+    /// `[len][ptr]` string representations, etc.) that do not fit in a
+    /// single 8-byte slot.
+    pub fn buildAllocaBytes(self: *Builder, type_idx: TypeIdx, size_bytes: u32) !Value {
+        return self.appendInstruction(.{
+            .opcode = .alloca,
+            .type_idx = type_idx,
+            .operands = try self.appendOperands(&.{size_bytes}),
+        });
+    }
+
     pub fn buildLoad(self: *Builder, type_idx: TypeIdx, ptr: Value) !Value {
         return self.appendInstruction(.{
             .opcode = .load,
@@ -777,7 +791,13 @@ fn printInstruction(module: *Module, func: Function, inst: Instruction, writer: 
             const gname = module.strings.get(module.globals.items[ops[0]].name);
             try w.print("global_addr @{s}", .{gname});
         },
-        .alloca => try w.print("alloca", .{}),
+        .alloca => {
+            if (ops.len == 0) {
+                try w.print("alloca", .{});
+            } else {
+                try w.print("alloca {d}", .{ops[0]});
+            }
+        },
         .load => try w.print("load %{d}", .{ops[0]}),
         .store => try w.print("store %{d}, %{d}", .{ ops[0], ops[1] }),
         .phi => {

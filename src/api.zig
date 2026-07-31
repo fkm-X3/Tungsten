@@ -380,6 +380,12 @@ pub const Context = struct {
         return self.builder.buildAlloca(type_idx);
     }
 
+    /// Allocate `size_bytes` of stack space, aligned to 8 bytes.
+    /// Returns a pointer to the start of the block.
+    pub fn buildAllocaBytes(self: *Context, type_idx: TypeIdx, size_bytes: u32) !Value {
+        return self.builder.buildAllocaBytes(type_idx, size_bytes);
+    }
+
     /// Load a value of `type_idx` from `ptr`.
     pub fn buildLoad(self: *Context, type_idx: TypeIdx, ptr: Value) !Value {
         return self.builder.buildLoad(type_idx, ptr);
